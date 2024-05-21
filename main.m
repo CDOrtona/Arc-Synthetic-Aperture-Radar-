@@ -1,143 +1,158 @@
-clear;
-clc;
-close all;
+clc
+clear
+close all
 
-%% Anonymous functions and Constants 
+% FMCW Simulation of a Circular SAR system
+
+%% Anonymous Functions and constants
 
 c = physconst('LightSpeed');
 
-% PRI is computed according to the maximum unambiguous range equation
-comp_PRI = @(d_max) (2.*d_max)./c;
+% compute bw based on the range resolution
+computeBw = @(range_res) c./(2.*range_res);
 
-% Maximum distance that can be scanned by the radar - it depends on fs
-comp_dMax = @(fs, b, tp) (fs.*c)./(2.*(b./tp));
+% compute the range based on the time of flight
+range2time = @(range) (2.*range)./c; 
 
-% PulseWidth of the chirp, it is the upsweep time of the chirp
-comp_Tp = @(dmax, B, fs) (2.*dmax.*B)./(fs.*c);
-
-% Range resolution - it depends on the bw
-comp_rangeRes = @(b) c./(2.*b);
-
-%% Initialize Radar and Environment Parameters
-
-% I'm setting the ROI dimensions - ROI_l is the maximum distance
-ROI_w = 900;
-ROI_l = 900;
-% radius of the physical platform the radar is mounted on
-r_platform = 0.13;
-
-% fast time sampling frequency
-fs = 150e6;
-% center(carrier) frequency
-fc = 77e9;
-pri = 7e-6;
-% slow time sampling frequency
-prf = 1/pri;
-% pulsewidth of the upsweeft chirp
-tp =  1.4e-7;
-
-bw = fs./2;
-
-% Range and Angle Resolution
-range_res = comp_rangeRes(bw);
-ang_res = 0.45;
-
-%% LFM Pulse Generator
-% A LFM pulse wave is generated
-% #tot_samples -> Fs/PRF = PRI/Ts -> we don't need all of these
-% #pulse_samples -> PRI/TS - (PRI-PW)/Ts -> these are the ones we need
-
-dutyCycle = tp./pri;
-wave = phased.LinearFMWaveform('SampleRate',fs, 'PulseWidth', tp, ...
-    'PRF', prf, 'SweepBandwidth', bw, 'NumPulses',1);
-
-sig = wave();
-Nr = length(sig);
-
-figure('Name','Chirp wave','NumberTitle','off');
-wav = step(wave);
-numpulses = size(wav,1);
-t = (0:(numpulses-1))/wave.SampleRate;
-plot(t*1e6,real(wav))
-xlabel('Time (\mu sec)')
-ylabel('Amplitude')
-
-%% Scenario - Targets
-% A radar scenario simulates a 3-D environment containing multiple platforms
-% I'm considering a scenario composed of three different targets
-% Such targets are located 500, 530, 750 meters away from the radar on the
-% x - axis, their speed is supposed to be zero, hence they are fixed in
-% space
-% We consider targets whose cross section is 10dB
+% compute the beat frequency based on the distance
+range2beat = @(range, sweep) sweep.*((2.*range)./c);
 
 
-% SAR_sim = radarScenario;
-% target_1 = platform(SAR_sim);
-% target_2 = platform(SAR_sim);
+%% Init Parameters
 
-Numtgts = 3;
-tgtpos = zeros(Numtgts);
-tgtpos(1,:) = [500 800 850];
-tgtvel = zeros(3,Numtgts);
-tgtvel(1,:) = [0 0 0];
-tgtrcs = db2pow(10)*[1 1 1];
-tgtmotion = phased.Platform(tgtpos,tgtvel);
-target = phased.RadarTarget('PropagationSpeed',c,'OperatingFrequency',fc, ...
-    'MeanRCS',tgtrcs);
+% I'm setting the ROI dimensions
+ROI_l = 5.5;
+ROI_w = 180;
 
-figure('Name','Target Positions in the scene','NumberTitle','off');
-h = axes;plot(tgtpos(2,1),tgtpos(1,1),'*g');hold all;plot(tgtpos(2,2),tgtpos(1,2),'*r');hold all;plot(tgtpos(2,3),tgtpos(1,3),'*b');hold off;
-set(h,'Ydir','reverse');xlim([-ROI_l ROI_l]);ylim([0 ROI_l]);
-title('Ground Truth');ylabel('Range');xlabel('Cross-Range');
+% carrier frequency
+fc = 79e9;
+lambda = c/fc;
 
-%% Scenario - SAR
+% I am assuming the maximum range is the same as the width
+range_max = ROI_l;
+% the upsweept time depends on the maximum unambiguous range
+% usually it is taken to be either 5 or 6 times greater the nominal value
+% unlike the pulsed chirp, FMCW chirp does not have a PRI time
+% it is not a monostatic system, we are using two antennas 
+tm = 5.5*range2time(range_max);
 
-radarpos = [0;0;0];
-radarvel = [0;0;0];
-radarmotion = phased.Platform(radarpos,radarvel);
-% Waypoints model
-x0 = 0;
-y0 = ROI_w;
+
+range_res = 0.043;
+ang_res = 0.5;
+bw = computeBw(range_res);
+sweep_slope = bw/tm;
+
+% the sampling frequency of the A/D converter can be actually smaller than 
+% twice the bandwidth. This holds true because of two reasons
+% 1) complex sampled signal: the sample rate can be set the same as the bw
+% 2) the sample rate can be computed based onto the max beat frequency 
+% we should consider the sum of the range and doppler beat frequency,
+% however the doppler beat frequency can be looked over since the targets
+% are still
+fb_max = range2beat(range_max, sweep_slope);
+fs = max(2.*fb_max,bw);
+fs = round(fs*tm)./tm;
+
+%% FMCW chirp signal
+
+waveform = phased.FMCWWaveform('SweepTime',tm,'SweepBandwidth',bw, ...
+    'SampleRate',fs, 'SweepDirection', 'up');
+
+sig = waveform();
+subplot(211); plot(0:1/fs:tm-1/fs,real(sig));
+xlabel('Time (s)'); ylabel('Amplitude (v)');
+title('FMCW signal'); axis tight;
+subplot(212); spectrogram(sig,32,16,32,fs,'yaxis');
+title('FMCW signal spectrogram');
+
+%% Radar Scene model 
+
+format long
+
+r_platform = 13e-2;
+
+T = ((ROI_w/ang_res)*tm);
+tStep = 0:tm:T;
+t = 0:size(tStep, 2)-1;
+vel = (2.*pi)./T;
+
+% waypoints model for a circular trajectory
+% initial positions of the radar platform
+x0 = r_platform;
+y0 = 0;
 z0 = 0;
-vx = 5;
-vy = 10;
-vz = 0;
-ax = 1;
-ay = -1;
 
-t = [0:1:400];
-x = x0 + vx*t + ax/2*t.^2;
-y = y0 + vy*t + ay/2*t.^2;
+% angular velocity for a semi-circle 
+angVel = (pi)./T; 
+% trajectory equation of a uniform circular motion
+law = angVel*tStep;  % theta = theta0 + w*t [radians]
+
+x = r_platform.*cos(law);
+y = r_platform.*sin(law);
 z = z0*ones(size(t));
-wpts = [t.' x.' y.' z.'];
+wpts = [tStep.' x.' y.' z.'];
 
-pltfm = phased.Platform('MotionModel','Custom','CustomTrajectory',wpts);
-tstep = .5;
-nsteps = 41;
-X = [];
+radarPlatform = phased.Platform('MotionModel','Custom','CustomTrajectory',wpts);
 
-for k = 1:nsteps
-    [pos,vel] = pltfm(tstep);
-    X = [X;pos'];   
-    figure;
-    plot(x,y,'o'); hold on
-    plot(X(:,1),X(:,2),'.')
-    hold off;
-end
+% figure;
+% X = [];
+% tstep = tm;
+% nsteps = 361;
+% for k = 1:nsteps
+%     [pos,vel] = radarPlatform(tstep);
+%     X = [X;pos'];    
+% end
+% plot(x,y,'o'); hold on
+% plot(X(:,1),X(:,2),'.')
+% hold off;
 
-%% Rx and Tx Antennas Front-end and Back-end
-% They are both placed at the origin (monostatic)
+%% Target Model
 
-txantenna = phased.IsotropicAntennaElement;
+num_targets = 3;
+targetPos= ([1,2,0; -2,2,0; 4,3,0])'; 
+targetVel = zeros(num_targets);
+target = phased.RadarTarget('OperatingFrequency', fc, 'MeanRCS', db2pow(10)*ones(num_targets, 1)');
+pointTargets = phased.Platform('InitialPosition', targetPos,'Velocity',targetVel);
+
+figure
+plot(targetPos(1,1),targetPos(2,1),'*g')
+hold on
+plot(targetPos(1,2),targetPos(2,2),'*r')
+hold on
+plot(targetPos(1,3),targetPos(2,3),'*b')
+hold on
+
+% plot(X(:,1),X(:,2),'o');
+% title('Configurazione SCENA')
+xlim([-6 6])
+ylim([-6 6])
+
+%% Antenna parameters
+
+% MODIFICARE F RANGE
+txantenna =phased.IsotropicAntennaElement('FrequencyRange', [79e9 81e9]);
+%txantenna = phased.CosineAntennaElement('FrequencyRange', [77e9 81e9]);
 rxantenna = clone(txantenna);
+
+% figure;
+% pattern(txantenna,fc)
+
+ant_aperture = 6.06e-4;                         % in square meter
+ant_gain = aperture2gain(ant_aperture,lambda);  % in dB
+
+tx_ppower = db2pow(5)*1e-3;                     % in watts
+tx_gain = 9+ant_gain;                           % in dB
+
+rx_gain = 15+ant_gain;                          % in dB
+rx_nf = 4.5;                                    % in dB
+
 
 peakpower = 10;
 txgain = 36.0;
 transmitter = phased.Transmitter( ...
-    'PeakPower',peakpower, ...
-    'Gain',txgain, ...
+    'PeakPower',tx_ppower, ...
+    'Gain',tx_gain, ...
     'InUseOutputPort',true);
-
 radiator = phased.Radiator( ...
     'Sensor',txantenna, ...
     'PropagationSpeed',c, ...
@@ -153,74 +168,216 @@ collector = phased.Collector( ...
     'Sensor',rxantenna, ...
     'PropagationSpeed',c, ...
     'OperatingFrequency',fc);
-
 rxgain = 42.0;
 noisefig = 10;
 receiver = phased.ReceiverPreamp( ...
     'SampleRate',fs, ...
-    'Gain',rxgain, ...
-    'NoiseFigure',noisefig);
+    'Gain',rx_gain, ...
+    'NoiseFigure',rx_nf);
 
-%% Data cube generation
-% I'm generating a radar cube NrxNp
-%
-% Nr -> #samples of the chirp -> fast-time
-% Np -> #pulses(step angles Tx is transmitting towards to) -> slow-time
-% Pulses are being transmitted towards only one direction in this set-up
-%
-% We first compute the actual value of the PRI of a pulse that is needed in
-% order to cover a predefined maximum unambiguous distance. Then the Nr, 
-% which is the actual number of samples, is computed
+% specanalyzer = dsp.SpectrumAnalyzer('SampleRate',fs,...
+%     'PlotAsTwoSidedSpectrum',true,...
+%     'Title','Spectrum for received and dechirped signal',...
+%     'ShowLegend',true);
 
-%Nr = ceil(comp_PRI(ROI_l).*fs);
-Np = 128;
-radarCube = zeros(Nr,Np);
-for n = 1:Np
-    [sensorpos,sensorvel] = radarmotion(pri);
-    [tgtpos,tgtvel] = tgtmotion(pri);
-    [tgtrng,tgtang] = rangeangle(tgtpos,sensorpos);
-    sig = wave();
-    % we use only the pulse length that covers the targets
-    sig = sig(1:Nr);
-    [txsig,txstatus] = transmitter(sig);
-    txsig = radiator(txsig,tgtang);
-    txsig = channel(txsig,sensorpos,tgtpos,sensorvel,tgtvel);    
-    tgtsig = target(txsig);   
-    rxcol = collector(tgtsig,tgtang);
-    rxsig = receiver(rxcol);
-    radarCube(:,n) = rxsig;
+%% CSAR Simulation 
+
+nSweep = length(t);
+s = complex(zeros(waveform.SampleRate*waveform.SweepTime,nSweep));
+s_unchirped = zeros(size(s));
+
+poss = [];
+
+for m = 1:nSweep
+    % Update radar and target positions
+    [radarPos,radarVel] = radarPlatform(tm);
+    
+    poss = cat(1, poss, reshape(radarPos, [1, 3]));
+
+    % THIS NEEDS TO BE FIXED
+    % radarPos = X(m,:)';
+    % radarVel = X_vel(m,:)';
+
+    [targetPos, targetVel] = pointTargets(waveform.SweepTime);
+
+    % Get the range and angle to the point targets
+    [targetRange, targetAngle] = rangeangle(targetPos, radarPos);
+
+    % Transmit FMCW waveform
+    sig = waveform();
+    txSig = transmitter(sig);
+
+    % Radiate the pulse towards the targets
+    txSig = radiator(txSig, targetAngle);
+    
+    % Propagate the signal and reflect off the target
+    txSig = channel(txSig,radarPos,targetPos,radarVel,targetVel);
+
+    % Reflect the pulse off the targets
+    txSig = target(txSig);
+
+    % Collect the reflected pulses at the antenna
+    rxSig = collector(txSig, targetAngle);
+    
+    % Dechirp the received radar return
+    rxSig = receiver(rxSig);    
+    dechirpedSig = dechirp(rxSig,sig);
+    
+    % Visualize the spectrum
+    %specanalyzer([rxSig dechirpedSig]);
+    s_unchirped(:,m) = rxSig;
+    s(:,m) = dechirpedSig;
 end
 
-%% Display the image of the data cube containing signals per pulse
+figure
+imagesc(abs(s));
+title('SAR Raw Data Dechirped')
 
-figure;
-imagesc((0:(Np-1))*pri*1e6,(0:(Nr-1))/fs*1e6,abs(radarCube))
-xlabel('Slow Time {\mu}s')
-ylabel('Fast Time {\mu}s')
+%% Range Migration Correction for focusing
 
-%% Range Response - Range FFT
-matchingcoeff = getMatchedFilter(wave);
-ndop = 1;
-rangeresp = phased.RangeResponse('SampleRate',fs,'PropagationSpeed',c);
-[resp,rnggrid] = rangeresp(radarCube,matchingcoeff);
-figure;
-imagesc((1:Np),rnggrid,abs(resp))
-xlabel('Pulse')
-ylabel('Range (m)')
-
-%% Integrate noncoherent
-figure;
-intpulse = pulsint(resp(:,1:20),'noncoherent');
-plot(rnggrid,abs(intpulse))
-xlabel('Range (m)')
-title('Noncoherent Integration of 20 Pulses')
-
-%% BackProjection
-
-% bpa_processed = helperBackProjection(resp,rnggrid,ceil(Nr./fs),fc,fs,prf,0,(c./(2.*bw)),c);
+% vel_radarPlat = (pi.*r_platform)./(ROI_w/ang_res)*tm;
+% vel = (2.*pi)./(ROI_w/ang_res)*tm;
 % 
-% figure()
-% imagesc((abs(bpa_processed(600:1400,1700:2300))));
-% title('SAR Data focused using Back-Projection algorithm ')
-% xlabel('Cross-Range Samples')
-% ylabel('Range Samples')
+% slcimg = rangeMigrationFMCW(s,waveform,fc, vel_radarPlat, r_platform);
+% 
+% figure;
+% imagesc(abs(slcimg));
+
+%% Decimation 
+
+% Dn = fix(fs/(2*fb_max));
+% for m = size(s,2):-1:1
+%     s_dec(:,m) = decimate(s(:,m),Dn,'FIR');
+% end
+% fs_d = fs/Dn;
+
+%% Signal Sampling 
+
+fs_adc= fb_max;
+step_cut=round(size(s,1)/round(tm*fs_adc));
+s_sampled=s(1:step_cut:end,:);
+
+
+%% Range and Doppler estimation 
+
+% rngdopresp = phased.RangeDopplerResponse('PropagationSpeed',c,...
+%     'DopplerOutput','Speed','OperatingFrequency',fc,'SampleRate',fs,...
+%     'RangeMethod','FFT','SweepSlope',sweep_slope,...
+%     'RangeFFTLengthSource','Property','RangeFFTLength',2048,...
+%     'DopplerFFTLengthSource','Property','DopplerFFTLength',256);
+% 
+% figure;
+% plotResponse(rngdopresp,s_sampled);                     % Plot range Doppler map
+% axis([-v_max v_max 0 range_max])
+
+%% FFT tests
+
+% s_fft = fft(s_dec, [], 1);
+% s_fft = abs(s_fft);
+% s_fft = s_fft./max(s_fft);
+% % s_fft1 = beat2range(s_fft(:,1), sweep_slope);
+% % s_fft2 = beat2range(s_fft(:,2), sweep_slope);
+% 
+% f = 1:size(s_fft, 1);
+% range_raw=c*f/(2*sweep_slope);
+% range=(ROI_l/range_raw(end))*range_raw';
+% 
+% figure;
+% plot(range, s_fft(:,1), 'g'); 
+% axis([0 5.5 0 1]);
+
+
+%% FFT-RANGE
+% mix_cut = slcimg;
+% Mix_fft_2S=(fft(mix_cut,[],1)); %fft in matrice opera lungo colonne(X,[],1) per farlo lungo righe deve essere(X,[],2)
+% Mix_fft_2S = fftshift((Mix_fft_2S/length(Mix_fft_2S)),1);%fft in matrice opera lungo colonne(X,1) per farlo lungo righe deve essere(X,2
+% lm_2S=size(Mix_fft_2S,1);
+% f_2S= fs_adc/lm_2S *(-lm_2S/2:lm_2S/2-1);
+% figure
+% plot(abs(Mix_fft_2S(:,1)));
+% hold on
+% plot(abs(Mix_fft_2S(:,end)),'r');
+% title('FFT-DS')
+% % 
+% % FFT Singole Side
+% lm=round(lm_2S/2);
+% Mix_fft = 2*Mix_fft_2S(lm-1:-1:1,:);
+% f=(f_2S(round(lm_2S/2)+1:end)); 
+% range_raw=c*f/(2*sweep_slope);
+% range=(maxRange/range_raw(end))*range_raw';
+% 
+% figure
+% plot(range(1:end),abs(Mix_fft(:,1)));
+% hold on
+% plot(range(1:end),abs(Mix_fft(:,end)),'r');
+% % plot(abs(Mix_fft(1:end,:)))
+% title('FFT-SS')
+% xlim([0 6])
+% ylabel('Amplitude')
+
+%% Imaging through Back-Projection 1
+
+%    l
+%   ---------
+% i |            Number of Pixels of the image
+%   |              
+i = floor(ROI_l./(range_res));
+l = floor(ROI_w./(ang_res)+1);
+
+
+S = s_sampled;
+fastTime_sample = size(S,1);
+
+phi_m = 0:ang_res:180;
+i_k = 0:fastTime_sample-1; % (i-1)
+
+
+% tau = 2*R/c -> R is the distance from the radar to the target 
+% R is a row 1xM, where M is the number of slow-time samples
+tau = @(r_l, phi_l, phi_m) sqrt(r_l.^2+r_platform.^2-2.*r_platform.*r_l*cosd(phi_m-phi_l)).*(2./c);
+a = @(r_l, phi_l, phi_m, i_k) exp(1i.*2.*pi.*(fc.*tau(r_l, phi_l, phi_m) - (sweep_slope./2)*tau(r_l, phi_l, phi_m).^2 + i_k'*(bw./fastTime_sample)*tau(r_l, phi_l, phi_m)));
+
+% image matrix ixl
+g = zeros(i,l);
+
+tic 
+for q = 1:l
+    for p = 1:i
+        a_il_cs = a((p-1)*range_res, (q-1)*ang_res, phi_m, i_k);
+        g(p,q) = conj(reshape(a_il_cs,[1,numel(a_il_cs)]))*reshape(S, [numel(S), 1]);
+     end
+end
+toc
+
+figure;
+imagesc(abs(g));
+
+%% from Polar to Cartesian
+
+r_l = (0:range_res:(ROI_l-range_res))';  % Create column vector for range
+theta_l = 0:ang_res:ROI_w;  % Create row vector for angles
+% Convert polar to Cartesian coordinates
+[Theta, R] = meshgrid(theta_l, r_l);
+[Xc, Yc] = pol2cart(deg2rad(Theta), R);  % Use radians for trigonometric functions
+% Ensure Intensity_polarMatrix is of the correct size
+%assert(all(size(g) == size(Theta)), 'Size mismatch between Intensity_polarMatrix and Theta');
+% Flatten the matrices for interpolation
+Xc_flat = Xc(:);
+Yc_flat = Yc(:);
+Intensity_flat = g(:);
+% Create scattered interpolant
+Cartesian_intensity = scatteredInterpolant(Xc_flat, Yc_flat, Intensity_flat, 'linear', 'none');
+% Create a Cartesian grid for interpolation
+xq = linspace(min(Xc_flat), max(Xc_flat), 128);
+yq = linspace(min(Yc_flat), max(Yc_flat), 361);
+[Xq, Yq] = meshgrid(xq, yq);
+% Interpolate the intensity values on the Cartesian grid
+Interpolated_intensity = Cartesian_intensity(Xq, Yq);
+% Plot the result (optional)
+figure;
+imagesc(xq, yq, abs(Interpolated_intensity));
+axis xy;
+xlabel('X (meters)');
+ylabel('Y (meters)');
+title('Interpolated Intensity in Cartesian Coordinates');
+colorbar;
