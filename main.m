@@ -6,7 +6,12 @@ close all
 
 %% Anonymous Functions and constants
 
+
+% carrier frequency
+fc = 79e9;
+
 c = physconst('LightSpeed');
+lambda = c/fc;
 
 % compute bw based on the range resolution
 computeBw = @(range_res) c./(2.*range_res);
@@ -17,16 +22,14 @@ range2time = @(range) (2.*range)./c;
 % compute the beat frequency based on the distance
 range2beat = @(range, sweep) sweep.*((2.*range)./c);
 
+% compute azimuth resolution
+az_res = @(r, beam_width) rad2deg(lambda./(2.*r.*deg2rad(beam_width)));
 
 %% Init Parameters
 
 % I'm setting the ROI dimensions
-ROI_l = 5.5;
+ROI_l = 7;
 ROI_w = 180;
-
-% carrier frequency
-fc = 79e9;
-lambda = c/fc;
 
 % I am assuming the maximum range is the same as the length of the ROI
 range_max = ROI_l;
@@ -38,7 +41,8 @@ tm = 6*range2time(range_max);
 % tm = 68.9*10^-6;
 
 prf = 1e4;
-pri = 1\prf;
+pri = 1./prf;
+
 
 
 range_res = 0.043;
@@ -57,14 +61,6 @@ fb_max = range2beat(range_max, sweep_slope);
 fs = max(2.*fb_max,bw);
 fs = round(fs*tm)./tm;
 
-
-
-% %% Pulsed chirp signal
-% 
-% waveform = phased.LinearFMWaveform('SampleRate',fs, ...
-%     'PRF',prf,'OutputFormat','Pulses','NumPulses',1,'SweepBandwidth',bw, ...
-%     'DurationSpecification','Duty cycle','DutyCycle',duty);
-
 %% FMCW chirp signal
 
 waveform = phased.FMCWWaveform('SweepTime',tm,'SweepBandwidth',bw, ...
@@ -79,12 +75,11 @@ title('FMCW signal spectrogram');
 
 %% Radar Scene model 
 
-radius_platform = 13e-2;
+radius_platform = 0.13;
 
 T = ((ROI_w/ang_res)*pri);
 tStep = 0:pri:T;
 t = 0:size(tStep, 2)-1;
-vel = (2.*pi)./T;
 
 % waypoints model for a circular trajectory
 % initial positions of the radar platform
@@ -100,26 +95,15 @@ traj = w*tStep;  % theta = theta0 + w*t [radians]
 x = radius_platform.*cos(traj);
 y = radius_platform.*sin(traj);
 z = z0*ones(size(t));
-wpts = [tStep.' x.' y.' z.'];
+waypoints = [tStep.' x.' y.' z.'];
 
-radarPlatform = phased.Platform('MotionModel','Custom','CustomTrajectory',wpts);
+radarPlatform = phased.Platform('MotionModel','Custom','CustomTrajectory',waypoints);
 
-% figure;
-% X = [];
-% tstep = pri;
-% nsteps = 361;
-% for k = 1:nsteps
-%     [pos,vel] = radarPlatform(tstep);
-%     X = [X;pos'];    
-% end
-% plot(x,y,'o'); hold on
-% plot(X(:,1),X(:,2),'.')
-% hold off;
 
 %% Target Model
 
 num_targets = 3;
-targetPos= ([1,2,0;-2,2,0; 4,2,0])'; 
+targetPos= ([1,2,0; 3,2,0; -2,1,0])';  
 targetVel = zeros(num_targets);
 target = phased.RadarTarget('OperatingFrequency', fc, 'MeanRCS', db2pow(10)*ones(num_targets, 1)');
 pointTargets = phased.Platform('InitialPosition', targetPos,'Velocity',targetVel);
@@ -132,44 +116,26 @@ pointTargets = phased.Platform('InitialPosition', targetPos,'Velocity',targetVel
 % plot(targetPos(1,3),targetPos(2,3),'*b')
 % hold on
 
+%% Radar Initialization 
 
-%% Antenna parameters
+antenna = phased.CosineAntennaElement('CosinePower',[6,6]);
+az = -180:180;
+el = -60:60;
+pat = zeros(numel(el),numel(az),'like',1);
+for m = 1:numel(el)
+    temp = antenna(fc,[az;el(m)*ones(1,numel(az))]);
+    pat(m,:) = temp;
+end
 
-txantenna =phased.IsotropicAntennaElement('FrequencyRange', [79e9 83e9]);
-%txantenna = phased.CosineAntennaElement('FrequencyRange', [77e9 81e9]);
-rxantenna = clone(txantenna);
+imagesc(az,el,abs(pat))
+axis xy
+axis equal
+axis tight
+xlabel('Azimuth (deg)')
+ylabel('Elevation (deg)')
+title('Original Radiation Pattern')
+colorbar
 
-% figure;
-% pattern(txantenna,fc)
-
-peakpower = 10;
-txgain = 36.0;
-transmitter = phased.Transmitter( ...
-    'PeakPower',peakpower, ...
-    'Gain',txgain, ...
-    'InUseOutputPort',true);
-radiator = phased.Radiator( ...
-    'Sensor',txantenna, ...
-    'PropagationSpeed',c, ...
-    'OperatingFrequency',fc);
-
-channel = phased.FreeSpace( ...
-    'SampleRate',fs, ...    
-    'PropagationSpeed',c, ...
-    'OperatingFrequency',fc, ...
-    'TwoWayPropagation',true);
-
-collector = phased.Collector( ...
-    'Sensor',rxantenna, ...
-    'PropagationSpeed',c, ...
-    'OperatingFrequency',fc);
-
-rxgain = 42.0;
-noisefig = 10;
-receiver = phased.ReceiverPreamp( ...
-    'SampleRate',fs, ...
-    'Gain',rxgain, ...
-    'NoiseFigure',noisefig);
 
 %% CSAR Simulation 
 
@@ -178,8 +144,16 @@ s = complex(zeros(waveform.SampleRate*waveform.SweepTime,nSweep));
 s_unchirped = zeros(size(s));
 
 for m = 1:nSweep
+
+    [transmitter, radiator, channel, collector, receiver] = dynamicAntenna(fc, fs, pat, el, az, ang_res, m);
+
     % Update radar and target positions
     [radarPos,radarVel] = radarPlatform(pri);
+
+%     restart(scene);
+%     restart(radarPlat);
+%     advance(scene);
+%     pos = pose(radarPlat);
     
     [targetPos, targetVel] = pointTargets(pri);
 
@@ -215,23 +189,7 @@ figure
 imagesc(abs(s));
 title('SAR Raw Data Dechirped')
 
-%% Range Migration Correction for focusing
 
-% vel_radarPlat = (pi.*r_platform)./(ROI_w/ang_res)*tm;
-% vel = (2.*pi)./(ROI_w/ang_res)*tm;
-% 
-% slcimg = rangeMigrationFMCW(s,waveform,fc, vel_radarPlat, r_platform);
-% 
-% figure;
-% imagesc(abs(slcimg));
-
-%% Decimation 
-
-% Dn = fix(fs/(2*fb_max));
-% for m = size(s,2):-1:1
-%     s_dec(:,m) = decimate(s(:,m),Dn,'FIR');
-% end
-% fs_d = fs/Dn;
 
 %% Signal Sampling 
 
@@ -239,14 +197,6 @@ fs_adc= fb_max;
 step_cut=round(size(s,1)/round(tm*fs_adc));
 s_sampled=s(1:step_cut:end,:);
 
-%% FFT
-y = abs(fft(s_sampled,2.^nextpow2(size(s_sampled, 1)),1));
-fs_fft = size(y, 1);
-faxis = linspace(-fs_fft/2,fs_fft/2,fs_fft);
-plot(faxis, y(:,1), 'g')
-hold on
-plot(faxis, y(:,end), 'b')
-hold off;
 
 %% Imaging through Back-Projection 1
 
@@ -275,9 +225,9 @@ g = zeros(i,l);
 
 tic 
 for q = 1:l
-    for p = 1:i
-        a_il_cs = a((p-1)*range_res, (q-1)*ang_res, phi_m, i_k);
-        g(p,q) = conj(reshape(a_il_cs,[1,numel(a_il_cs)]))*reshape(S, [numel(S), 1]);
+    for pos = 1:i
+        a_il_cs = a((pos-1)*range_res, (q-1)*ang_res, phi_m, i_k);
+        g(pos,q) = conj(reshape(a_il_cs,[1,numel(a_il_cs)]))*reshape(S, [numel(S), 1]);
      end
 end
 toc
@@ -318,28 +268,23 @@ colorbar;
 
 
 
+
+
+
 %% --------------------- TESTS -------------------------
 
-%% Range and Doppler estimation 
-
-% rngdopresp = phased.RangeDopplerResponse('PropagationSpeed',c,...
-%     'DopplerOutput','Speed','OperatingFrequency',fc,'SampleRate',fs,...
-%     'RangeMethod','FFT','SweepSlope',sweep_slope,...
-%     'RangeFFTLengthSource','Property','RangeFFTLength',2048,...
-%     'DopplerFFTLengthSource','Property','DopplerFFTLength',256);
-% 
-% figure;
-% plotResponse(rngdopresp,s_sampled);                     % Plot range Doppler map
-% axis([-v_max v_max 0 range_max])
-
 %% FFT
-y = abs(fft(s_sampled,2.^nextpow2(size(s_sampled, 1)),1));
-fs_fft = size(y, 1);
-faxis = linspace(-fs_fft/2,fs_fft/2-1,fs_fft);
-plot(faxis, y(:,1), 'g')
-hold on
-plot(faxis, y(:,end), 'b')
-hold off;
+% figure;
+% y = abs(fft(s_sampled,[],1));
+% N = size(y, 1);
+% y = fftshift(y, 1);
+% y = y/N;
+% faxis = linspace(-fb_max/2, fb_max/2-1, N);
+% faxis = beat2range(faxis', sweep_slope);
+% plot(faxis, y(:,1), 'g')
+% hold on
+% plot(faxis, y(:,end), 'b')
+% hold off;
 
 %% FFT-RANGE
 % mix_cut = s_dec;
@@ -368,3 +313,63 @@ hold off;
 % title('FFT-SS')
 % xlim([0 6])
 % ylabel('Amplitude')
+%% Radar Scenario new model
+
+% radius_platform = 0.13;
+% 
+% T = ((ROI_w/ang_res)*pri);
+% tStep = 0:pri:T;
+% t = 0:size(tStep, 2)-1;
+% 
+% % waypoints model for a circular trajectory
+% % initial positions of the radar platform
+% x0 = radius_platform;
+% y0 = 0;
+% z0 = 0;
+% 
+% % angular velocity for a semi-circle 
+% w = (pi)./T; 
+% % trajectory equation of a uniform circular motion
+% traj = w*tStep;  % theta = theta0 + w*t [radians]
+% 
+% x = radius_platform.*cos(traj);
+% y = radius_platform.*sin(traj);
+% z = z0*ones(size(t));
+% waypoints = [tStep.' x.' y.' z.'];
+% 
+% scene = radarScenario;
+% scene.UpdateRate = prf;
+% 
+% radarPlat = scene.platform;
+% object1 = scene.platform;
+% 
+% radarPlat.Trajectory = waypointTrajectory(waypoints(:,2:4), waypoints(:,1));
+% 
+% while advance(scene)  
+%     pos = pose(radarPlat);
+%     disp(strcat("Time = ",num2str(scene.SimulationTime)))
+%     disp(strcat("  Position = [",num2str(pos.Position),"]"))
+%     disp(strcat("  Velocity = [",num2str(pos.Velocity),"]"))
+%     % pause is used to mimic real-time processing
+%     pause(1./scene.UpdateRate);
+% end
+% 
+% restart(scene);
+% restart(radarPlat);
+% 
+% figure
+% grid
+% axis equal
+% axis([-0.3 0.3 -0.3 0.3])
+% line1 = animatedline('DisplayName','Trajectory 1','Color','b','Marker','.');
+% title('Trajectories')
+% p1 = pose(radarPlat);
+% addpoints(line1,p1.Position(1),p1.Position(2));
+% 
+% while advance(scene)
+%     p1 = pose(radarPlat);
+%     addpoints(line1,p1.Position(1),p1.Position(2));
+%     pause(1./scene.UpdateRate);
+% end
+% 
+% 
