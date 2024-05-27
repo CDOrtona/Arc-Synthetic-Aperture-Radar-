@@ -10,9 +10,9 @@ txantenna = phased.CustomAntennaElement( ...
     'AzimuthAngles',az,'ElevationAngles',el,'SpecifyPolarizationPattern',false, ...
     'MagnitudePattern',mag2db(abs(rpat)), ...
     'PhasePattern',zeros(size(rpat)));
+
+% Antenna di ricezione dovrei farla sfasata di lambda mezzi rispetto a tx
 rxantenna = clone(txantenna);
-
-
 
 %% Radar System Initialization
 

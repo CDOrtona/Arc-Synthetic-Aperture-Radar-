@@ -28,8 +28,10 @@ az_res = @(r, beam_width) rad2deg(lambda./(2.*r.*deg2rad(beam_width)));
 %% Init Parameters
 
 % I'm setting the ROI dimensions
-ROI_l = 7;
-ROI_w = 180;
+ROI_l = 5;
+ROI_w = 5;
+% The scanned angle by the CSAR system
+scan_angle = 180;
 
 % I am assuming the maximum range is the same as the length of the ROI
 range_max = ROI_l;
@@ -37,16 +39,18 @@ range_max = ROI_l;
 % usually it is taken to be either 5 or 6 times greater the nominal value
 % unlike the pulsed chirp, FMCW chirp does not have a PRI time
 % it is not a monostatic system, we are using two antennas 
-tm = 6*range2time(range_max);
+tm = 6*range2time(range_max); % this is correlated with the SNR and max dist
 % tm = 68.9*10^-6;
 
-prf = 1e4;
-pri = 1./prf;
+% prf = 1e4;
+% pri = 1./prf;
+pri = tm;
 
 
 
 range_res = 0.043;
 ang_res = 0.5;
+% ang_res = az_res(0.5, 29.96);
 bw = computeBw(range_res);
 sweep_slope = bw/tm;
 
@@ -66,6 +70,7 @@ fs = round(fs*tm)./tm;
 waveform = phased.FMCWWaveform('SweepTime',tm,'SweepBandwidth',bw, ...
     'SampleRate',fs, 'SweepDirection', 'up');
 
+figure
 sig = waveform();
 subplot(211); plot(0:1/fs:tm-1/fs,real(sig));
 xlabel('Time (s)'); ylabel('Amplitude (v)');
@@ -77,7 +82,7 @@ title('FMCW signal spectrogram');
 
 radius_platform = 0.13;
 
-T = ((ROI_w/ang_res)*pri);
+T = ((scan_angle/ang_res)*pri);
 tStep = 0:pri:T;
 t = 0:size(tStep, 2)-1;
 
@@ -103,22 +108,58 @@ radarPlatform = phased.Platform('MotionModel','Custom','CustomTrajectory',waypoi
 %% Target Model
 
 num_targets = 3;
-targetPos= ([1,2,0; 3,2,0; -2,1,0])';  
-targetVel = zeros(num_targets);
+targetPos= ([1,2,0; 3,2,0; 3.8, 3, 0])';  
+targetVel = zeros(size(targetPos));
 target = phased.RadarTarget('OperatingFrequency', fc, 'MeanRCS', db2pow(10)*ones(num_targets, 1)');
 pointTargets = phased.Platform('InitialPosition', targetPos,'Velocity',targetVel);
 
-% figure
-% plot(targetPos(1,1),targetPos(2,1),'*g')
-% hold on
-% plot(targetPos(1,2),targetPos(2,2),'*r')
-% hold on
-% plot(targetPos(1,3),targetPos(2,3),'*b')
-% hold on
+%% Plot Ground-Truth
+
+figure
+plot(targetPos(1,1),targetPos(2,1),'ob')
+hold on
+plot(targetPos(1,2),targetPos(2,2),'ob')
+hold on
+plot(targetPos(1,3),targetPos(2,3),'ob')
+hold on
+
+% plot antenna beam pattern
+th = linspace( 0, pi, 100);
+R = range_max;
+x_bp = R*cos(th);
+y_bp = R*sin(th);
+plot(x_bp,y_bp, '--r'); 
+hold on
+
+grid
+axis equal
+axis([-6 6 -0.5 6.5])
+line1 = animatedline('DisplayName','Trajectory 1','Color','r','Marker','.');
+title('Ground Truth')
+addpoints(line1,x(1),y(1));
+
+% Plot ROI
+x_roi = [-5, 5, 5, -5, -5];
+y_roi = [1, 1, 5, 5, 1];
+plot(x_roi, y_roi, 'g-', 'LineWidth', 3);
+hold on
+
+
+% Plot turning table
+for i = 1:length(t)
+    step(radarPlatform, pri);
+    addpoints(line1,x(i),y(i));
+    pause(5*pri);
+end
+
+hold off;
+
+radarPlatform.reset;
+
 
 %% Radar Initialization 
 
-antenna = phased.CosineAntennaElement('CosinePower',[6,6]);
+antenna = phased.CosineAntennaElement('FrequencyRange', [79e9 83e9], 'CosinePower',[6, 6]);
 az = -180:180;
 el = -60:60;
 pat = zeros(numel(el),numel(az),'like',1);
@@ -127,6 +168,7 @@ for m = 1:numel(el)
     pat(m,:) = temp;
 end
 
+figure
 imagesc(az,el,abs(pat))
 axis xy
 axis equal
@@ -189,7 +231,23 @@ figure
 imagesc(abs(s));
 title('SAR Raw Data Dechirped')
 
+%% Range Migration Correction for focusing
 
+% vel_radarPlat = (pi.*r_platform)./(ROI_w/ang_res)*tm;
+% vel = (2.*pi)./(ROI_w/ang_res)*tm;
+% 
+% slcimg = rangeMigrationFMCW(s,waveform,fc, vel_radarPlat, r_platform);
+% 
+% figure;
+% imagesc(abs(slcimg));
+
+%% Decimation 
+
+% Dn = fix(fs/(2*fb_max));
+% for m = size(s,2):-1:1
+%     s_dec(:,m) = decimate(s(:,m),Dn,'FIR');
+% end
+% fs_d = fs/Dn;
 
 %% Signal Sampling 
 
@@ -205,7 +263,7 @@ s_sampled=s(1:step_cut:end,:);
 % i |            Number of Pixels of the image
 %   |              
 i = floor(ROI_l./(range_res));
-l = floor(ROI_w./(ang_res)+1);
+l = floor(scan_angle./(ang_res)+1);
 
 
 S = s_sampled;
@@ -239,7 +297,7 @@ imagesc(abs(g));
 %% from Polar to Cartesian
 
 r_l = (0:range_res:(ROI_l-range_res))';  % Create column vector for range
-theta_l = 0:ang_res:ROI_w;  % Create row vector for angles
+theta_l = 0:ang_res:scan_angle;  % Create row vector for angles
 % Convert polar to Cartesian coordinates
 [Theta, R] = meshgrid(theta_l, r_l);
 [Xc, Yc] = pol2cart(deg2rad(Theta), R);  % Use radians for trigonometric functions
@@ -252,8 +310,8 @@ Intensity_flat = g(:);
 % Create scattered interpolant
 Cartesian_intensity = scatteredInterpolant(Xc_flat, Yc_flat, Intensity_flat, 'linear', 'none');
 % Create a Cartesian grid for interpolation
-xq = linspace(min(Xc_flat), max(Xc_flat), 128);
-yq = linspace(min(Yc_flat), max(Yc_flat), 361);
+xq = linspace(min(Xc_flat), max(Xc_flat), length(r_l));
+yq = linspace(min(Yc_flat), max(Yc_flat), length(theta_l));
 [Xq, Yq] = meshgrid(xq, yq);
 % Interpolate the intensity values on the Cartesian grid
 Interpolated_intensity = Cartesian_intensity(Xq, Yq);
@@ -267,8 +325,57 @@ title('Interpolated Intensity in Cartesian Coordinates');
 colorbar;
 
 
+%% Range Compression with matched filter
+
+% correlation
+[m, lg] = xcorr(s_unchirped(:,1), sig);
+m = abs(m(lg > 0));
+lm = lg(lg > 0);
+[m1, lg1] = xcorr(s_unchirped(:,2), sig);
+m1 = abs(m1(lg1 > 0));
+lm1 = lg1(lg1 > 0);
+
+% figure;
+% subplot(2,2,1)
+% plot(lm, m);
+% title("First Pulse")
+% subplot(2,2,2)
+% plot(lm1, m1);
+% title("Last Pulse")
+% sgtitle("Range Compression with matched filter");
+
+% convolution
+s_fft = fft(s_unchirped, [], 1);
+sig_fft = fft(conj(sig), [], 1);
+sig_fft = repmat(sig_fft, [1 size(s_fft, 2)]);
+
+rangeC_freq = sig_fft.*s_fft;
+
+rangeC_time = abs(ifft(rangeC_freq, [], 1));
+
+N = size(rangeC_time, 1);
+faxis = linspace(0, tm, N);
+
+% subplot(2,2,3)
+% plot(faxis, rangeC_time(:,1));
+% subplot(2,2,4)
+% plot(faxis, rangeC_time(:,2));
+% sgtitle("Range compression through convolution")
+
+figure
+imagesc((rangeC_time));
+ylim([0 150]);
 
 
+%% Beamwidth
+
+figure;
+% I'm printing the azimuth beamwidth with an elevation cut angle equal to 0
+[beamWidth, angles] = beamwidth(antenna, fc, 'cut', 'Azimuth', 'Cutangle', 0);
+beamwidth(antenna, fc, 'cut', 'Azimuth', 'Cutangle', 0)
+
+SNR = radareqsnr(lambda, [5 5], 10, tm, 'Gain', [42 42]);
+max_range = radareqrng(lambda,SNR,10,tm, 'unitstr', 'm');
 
 
 %% --------------------- TESTS -------------------------
@@ -373,3 +480,11 @@ colorbar;
 % end
 % 
 % 
+
+
+% What to do next: 
+% 1) Model Target Cross Section
+
+
+
+
