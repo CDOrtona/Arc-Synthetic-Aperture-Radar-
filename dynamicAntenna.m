@@ -1,4 +1,8 @@
 function [transmitter, radiator, channel, collector, receiver] = dynamicAntenna(fc, fs, antPatt, el, az, angRes, index)
+% 
+% This function is used to implement the rotation of the antenna for each step of the rotating platform
+% This makes sure that the antenna is always perpendicular to the direction of movement of the platform
+
 
 c = physconst('LightSpeed');
 
@@ -11,7 +15,6 @@ txantenna = phased.CustomAntennaElement( ...
     'MagnitudePattern',mag2db(abs(rpat)), ...
     'PhasePattern',zeros(size(rpat)));
 
-% Antenna di ricezione dovrei farla sfasata di lambda mezzi rispetto a tx
 rxantenna = clone(txantenna);
 
 %% Radar System Initialization
